@@ -1,0 +1,16 @@
+{
+  "name": "mqtt.js",
+  "description": "MQTT server and client nodejs implementation",
+  "version": "0.0.0",
+  "homepage": "https://github.com/paulbellamy/MQTT.js",
+  "author": "Paul Bellamy <paul.a.bellamy@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/paulbellamy/MQTT.js"
+  },
+  "main": "./mqtt.js",
+  "dependencies": {},
+  "engines": {
+    "node": ">=0.4.12"
+  }
+}
