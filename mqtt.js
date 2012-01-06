@@ -5,6 +5,8 @@ var net = require("net");
 var inspect = require("util").inspect;
 var EventEmitter = require("events").EventEmitter;
 
+var packet = require("./packet");
+
 /* Major TODO:
  * 1. Insert error checking code around clientID/topic name slices.
  *    These are notorious for crashing the program if the length is too long
@@ -26,12 +28,6 @@ var EventEmitter = require("events").EventEmitter;
  *    return packets rather than generating them in client.sendPacket
  */
 
-MQTTPacketType = {'Connect':1, 'Connack':2, 
-		  'Publish':3, 'Puback':4, 'Pubrec':5, 'Pubrel':6, 'Pubcomp':7, 
-		  'Subscribe':8, 'Suback':9, 'Unsubscribe':10, 'Unsuback':11,
-		  'Pingreq':12, 'Pingresp':13,
-		  'Disconnect':14};
-
 function MQTTClient(socket) {
     this.clientID = '';
     this.socket = socket;
@@ -42,17 +38,17 @@ function MQTTClient(socket) {
     var self = this;
 
     this.socket.on('data', function(data) {
-	self.accumulate(data);
+      self.accumulate(data);
     });
 
     this.on('packet_received', function(packet) {
-	self.process(packet);
+      self.process(packet);
     });
 
     /* TODO: consider catching the socket timeout event */
 
     this.socket.on('error', function(exception) {
-	self.emit('error', exception);
+      self.emit('error', exception);
     });
 
     /* Arguably this is an error if it doesn't come
@@ -65,157 +61,20 @@ function MQTTClient(socket) {
 sys.inherits(MQTTClient, EventEmitter);
 
 MQTTClient.prototype.accumulate = function(data) {
-    /* TODO: consider refactoring this */
-    var client = this;
+  var self = this;
+  if (!self.packet) {
+    self.packet = new MQTTPacket();
+    self.packet.on('end', function(packet) {
+      self.process(packet);
+    });
+  }
 
-    sys.log("Data received from client at " + client.socket.remoteAddress);
-    sys.log(inspect(data));
-
-    /* Add the incoming data to the client's data buffer */
-    var newSize = client.buffer.length + data.length;
-    var newBuf = new Buffer(newSize);
-    client.buffer.copy(newBuf);
-    data.copy(newBuf, client.buffer.length);
-    client.buffer = newBuf;
-
-    sys.log("Adding data to buffer:\n" + inspect(client.buffer));
-
-    /* Process all the data in the buffer */
-    while(client.buffer.length) {
-
-	var packet;
-	
-	/* Throw away the packet after, let's say, 5 seconds */
-	/* Consider emitting an error here, this suggests that
-	 * the client is either defective or is having 
-	 * network troubles of some kind.
-	 */
-	client.packetTimer = setTimeout(function(client) {
-	    client.packet = undefined;
-	    sys.log('Discarding incomplete packet');
-	    client.emit('error', "Discarding incomplete packet");
-	}, 5000, this);
-	    
-	if(client.packet === undefined) {
-	    /* Starting a new packet */
-
-	    /* Set up a packet template */
-	    /*
-	    client.packet = {
-		'command':undefined,
-		'dup':undefined,
-		'qos':undefined,
-		'retain':undefined,
-		'length':undefined
-	    };
-	    */
-
-	    client.packet = {};
-
-	    /* Fill out the header fields */
-	    if(client.packet.command === undefined) {
-		client.packet.command = (client.buffer[0] & 0xF0) >> 4;
-		client.packet.dup = ((client.buffer[0] & 0x08) == 0x08);
-		client.packet.qos = (client.buffer[0] & 0x06) >> 2;
-		client.packet.retain = ((client.buffer[0] & 0x01) != 0);
-
-		sys.log("Packet info: " + inspect(client.packet));
-	    }
-
-	    /* For convenience, set packet to client.packet */
-	    packet = client.packet;
-
-	    /* See if we have enough data for the header and the
-	     * shortest possible remaining length field
-	     */
-	    if(client.buffer.length < 2) {
-		/* Haven't got enough data for a new packet */
-		/* Wait for more */
-		sys.log("Incomplete packet received, waiting for more data");
-		break;
-	    }
-
-	    /* Calculate the length of the packet */
-	    var length = 0;
-	    var mul = 1;
-	    var gotAll = false;
-
-
-	    /* TODO: move calculating the length into a utility function */
-	    for(var i = 1; i < client.buffer.length; i++) {
-		length += (client.buffer[i] & 0x7F) * mul;
-		mul *= 0x80;
-		
-		if(i > 5) {
-		    /* Length field too long */
-		    sys.log("Error: length field too long");
-		    client.emit('error', "Length field too long");
-		    return;
-		}
-
-		/* Reached the last length byte */
-		if(!(client.buffer[i] & 0x80)) {
-		    gotAll = true;
-		    break;
-		}
-	    }
-
-	    /* Haven't got the whole of the length field yet, wait for more data */
-	    if(!gotAll) {
-		sys.log("Incomplete length field");
-		break;
-	    }
-
-	    /* The size of the header + the size of the remaining length
-	     * + the length of the body of the packet */
-	    packet.length = 1 + i + length;
-	    packet.lengthLength = i;
-	    sys.log("Length calculated: " + packet.length);
-	}
-
-	/* Ok, we have enough data to get the length of the packet
-	 * Now see if we have all the data to complete the packet
-	 */
-	if(client.buffer.length >= client.packet.length) {
-	    /* Cut the current packet out of the buffer */
-	    var chunk = client.buffer.slice(0, client.packet.length);
-
-	    /* Do something with it */
-	    sys.log("Packet complete\n" + inspect(chunk));
-	    /* Cut the body of the packet out of the buffer */
-	    packet.body = chunk.slice((client.packet.lengthLength + 1), chunk.length);
-
-	    /* Cut the lengthLength field out of the packet, we don't need it anymore */
-	    delete client.packet.lengthLength;
-
-	    /* Drive client.process() off the packet_received event */
-	    /* TODO: figure out if this is the best thing to do */
-	    /* Pros: 1. Less time spent out of the event loop
-	     *       2. Implementors can see when raw packets arrive, not just processed ones
-	     * Cons: 1. Debugging will be a bit of a pain
-	     *       2. Following flow of control will be worse
-	     */
-	    client.emit('packet_received', packet);
-	    //client.process(packet);
-
-	    /* We've got a complete packet, stop the incomplete packet timer */
-	    clearTimeout(client.packetTimer);
-
-	    /* Cut the old packet out of the buffer */
-	    client.buffer = client.buffer.slice(client.packet.length, client.buffer.length);
-	    /* Throw away the old packet */
-	    client.packet = undefined;
-	} else {
-	    /* Haven't got the whole packet yet, wait for more data */
-	    sys.log("Incomplete packet, bytes needed to complete: " + (client.packet.length - client.buffer.length));
-	    break;
-	}
-    }
-}
+  self.packet.write(data);
+};
 
 
 MQTTClient.prototype.process = function(packet) {
-    switch(packet.command) {
+  switch(packet.headers.command) {
 	case MQTTPacketType.Connect:
 	    var count = 0;
 
