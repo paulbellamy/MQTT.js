@@ -5,7 +5,7 @@ var net = require("net");
 var inspect = require("util").inspect;
 var EventEmitter = require("events").EventEmitter;
 
-var packet = require("./packet");
+var MQTTPacket = require("./packet");
 
 /* Major TODO:
  * 1. Insert error checking code around clientID/topic name slices.
@@ -62,13 +62,25 @@ sys.inherits(MQTTClient, EventEmitter);
 
 MQTTClient.prototype.accumulate = function(data) {
   var self = this;
-  if (!self.packet) {
+
+  // If we have no packet start a new one
+  var new_packet = function(leftover_bytes) {
     self.packet = new MQTTPacket();
-    self.packet.on('end', function(packet) {
+    self.packet.on('end', function(packet, leftovers) {
       self.process(packet);
+      new_packet(leftovers);
     });
+
+    if (leftover_bytes) {
+      self.packet.write(leftover_bytes);
+    }
   }
 
+  if (!self.packet) {
+    new_packet();
+  }
+
+  // Write data to this packet until it's complete
   self.packet.write(data);
 };
 
